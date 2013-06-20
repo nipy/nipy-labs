@@ -85,102 +85,133 @@ def _interaction_energy(ppm, XYZ, U, int ngb_size):
                                ngb_size)
 
 
-cdef eval_simplex_fitting_(double y, double* q0, double* m, double c1, double c2,
-                           np.npy_intp* idx, double* mat, np.npy_intp size_idx,
-                           double* b, double* qe, double* aux):
+cdef _simple_fitting_one_voxel(double y, double* q0, double* m, double* c,
+                               np.npy_intp* idx, double* mat, np.npy_intp size_idx,
+                               double* b, double* qe, double* aux):
     """
     Compute a feasible solution to the simplex fitting problem
-    assuming that the positiveness constraints on the elements given
-    by `idx` are inactive.
+    assuming that the positivity constraints on the elements given by
+    `idx` are inactive.
     """
     cdef np.npy_intp i, j, idx_i, K = 3
-    cdef double summ, tmp, tmp2, data_attach, prior
+    cdef double lda, mt_qe, summ, tmp
     cdef double *buf_mat
 
-    # Compute the sum of b over inactive components
-    summ = 0.0
-    for i from 0 <= i < size_idx:
-        summ += b[idx[i]]
-
-    # Correct b for the unit sum constraint
-    for i from 0 <= i < size_idx:
-        aux[i] = b[idx[i]] + (c2 - summ) / <double>size_idx
-
-    # Get the root of the Lagrangian derivative
+    # Compute qe = mat * b, aux = mat * 1, and the Lagrange multiplier
+    # lda that matches the unit sum constraint
     memset(<void*>qe, 0, K * sizeof(double))
+    memset(<void*>aux, 0, K * sizeof(double))
+    lda = 0.0
+    summ = 0.0
     buf_mat = mat
     for i from 0 <= i < size_idx:
         idx_i = idx[i]
         for j from 0 <= j < size_idx:
-            qe[idx_i] += buf_mat[0] * aux[j]
+            tmp = buf_mat[0]
+            qe[idx_i] += tmp * b[idx[j]]
+            aux[idx_i] += tmp
             buf_mat += 1
+        lda += qe[idx_i]
+        summ += aux[idx_i]
+    lda = (lda - 1)/ summ
 
-    # Renormalize the solution
+    # Compute the candidate solution (replace negative components by
+    # zero)
     summ = 0.0
-    for i from 0 <= i < K:
-        tmp = qe[i]
+    for i from 0 <= i < size_idx:
+        idx_i = idx[i]
+        tmp = qe[idx_i] - lda * aux[idx_i]
         if tmp < 0:
-            qe[i] = 0.0
-            tmp = 0.0
+            tmp = 0
+        qe[idx_i] = tmp
         summ += tmp
+
+    # Replace qe with a uniform distribution for safety if all
+    # components are small
     if summ < 1e-20:
         for i from 0 <= i < K:
             qe[i] = 1.0 / <double>K
             summ = 1.0
 
-    # Compute fitting objective value
-    data_attach = 0.0
-    prior = 0.0
+    # Renormalize qe and compute mt_qe = m' * qe and aux = qe - q0
+    mt_qe = 0.0
     for i from 0 <= i < K:
         qe[i] /= summ
         tmp = qe[i]
-        data_attach += tmp * m[i]
-        tmp2 = tmp - q0[i]
-        prior += tmp2 * tmp2
-    tmp = y - data_attach
-    return c1 * tmp * tmp + c2 * prior
+        mt_qe += tmp * m[i]
+        aux[i] = tmp - q0[i]
 
-
-cdef simplex_fitting_(double* q, double y, double* q0, double* m, double c1, double c2,
-                      nonzero_elements, solver, double* b, double* qe, double* aux):
-    cdef np.npy_intp i, K = 3, Kbytes = K * sizeof(double), size_idx
-    cdef np.flatiter itNonzero_Elements, itSolver
-    cdef np.npy_intp* idx
-    cdef double* mat
-    cdef np.PyArrayObject *idx_ptr, *mat_ptr
-    cdef double obj, obj_current = HUGE_VAL
-
-    itNonzero_Elements = nonzero_elements.flat
-    itSolver = solver.flat
-
-    # Compute b = c1 * y * m + c2 * q0
+    # Compute (qe - q0)^t C (qe - q0)
+    buf_mat = c
+    summ = 0.0
     for i from 0 <= i < K:
-        b[i] = c1 * y * m[i] + c2 * q0[i]
+        tmp = 0.0
+        for j from 0 <= j < K:
+            tmp += buf_mat[0] * aux[j] 
+            buf_mat += 1
+        summ += aux[i] * tmp 
 
-    while np.PyArray_ITER_NOTDONE(itNonzero_Elements):
-        idx_ptr = (<np.PyArrayObject**> np.PyArray_ITER_DATA(itNonzero_Elements))[0]
+    # Return the objective value
+    tmp = y - mt_qe
+    return tmp * tmp + summ
+
+
+cdef simple_fitting_one_voxel(double* q, double y, double* q0, double* m, double* c,
+                              inactives, solver, double* b, double* qe, double* aux):
+    cdef np.npy_intp i, j, K = 3, Kbytes = K * sizeof(double), size_idx
+    cdef np.flatiter itInactives, itSolver
+    cdef np.npy_intp* idx
+    cdef double *mat, *buf_mat
+    cdef np.PyArrayObject *idx_ptr, *mat_ptr
+    cdef double tmp, best = HUGE_VAL
+
+    # Compute b = y * m + c * q0
+    buf_mat = c
+    for i from 0 <= i < K:
+        tmp = y * m[i]
+        for j from 0 <= j < K:
+            tmp += buf_mat[0] * q0[j]
+            buf_mat += 1
+        b[i] = tmp
+
+    # Evaluate each hypothesis regarding active inequality constraints
+    itInactives = inactives.flat
+    itSolver = solver.flat
+    while np.PyArray_ITER_NOTDONE(itInactives):
+        idx_ptr = (<np.PyArrayObject**> np.PyArray_ITER_DATA(itInactives))[0]
         idx = <np.npy_intp*>np.PyArray_DATA(<object> idx_ptr)
         mat_ptr = (<np.PyArrayObject**> np.PyArray_ITER_DATA(itSolver))[0]
         mat = <double*>np.PyArray_DATA(<object> mat_ptr)
-
         size_idx = np.PyArray_DIM(<object>idx_ptr, 0)
-
-        obj = eval_simplex_fitting_(y, q0, m, c1, c2, idx, mat, size_idx, b, qe, aux)
-        if obj < obj_current:
+        tmp = _simple_fitting_one_voxel(y, q0, m, c, idx, mat, size_idx, b, qe, aux)
+        if tmp < best:
             memcpy(<void*>q, <void*>qe, Kbytes)
-            obj_current = obj
-
-        np.PyArray_ITER_NEXT(itNonzero_Elements)
+            best = tmp
+        np.PyArray_ITER_NEXT(itInactives)
         np.PyArray_ITER_NEXT(itSolver)
 
-    return
 
-def simplex_fitting(Y, M, Q0, C1, C2):
+def simplex_fitting(Y, M, Q0, C):
+    """
+    simplex_fitting(y, m, q0, C)
+
+    Find the vector on the standard simplex in dimension 3 that
+    minimizes:
+    
+    (y - m^t * q)^2 + (q - q0)^t C (q - q0)
+    
+    where dimensions are:
+      y : (N,)
+      M : (3,)
+      Q0: (N,3)
+      C: (3,3)
+    
+    Parameter `q0` is modified in place.
+    """
     cdef np.flatiter itY, itQ0
     cdef double *y, *q0
     cdef int axis = 1
-    cdef double *m, *b, *qe, *aux
-    cdef double c1 = <double>C1, c2 = <double>C2
+    cdef double *m, *c, *b, *qe, *aux
     cdef K = 3, Kbytes = K * sizeof(double)
 
     if not Q0.flags['C_CONTIGUOUS'] or not Q0.dtype=='double':
@@ -188,7 +219,9 @@ def simplex_fitting(Y, M, Q0, C1, C2):
 
     Y = np.asarray(Y, dtype='double')
     M = np.asarray(M, dtype='double', order='C')
+    C = np.asarray(C, dtype='double', order='C')
     m = <double*>np.PyArray_DATA(M)
+    c = <double*>np.PyArray_DATA(C)
     itY = Y.flat
     itQ0 = np.PyArray_IterAllButAxis(Q0, &axis)
 
@@ -196,16 +229,12 @@ def simplex_fitting(Y, M, Q0, C1, C2):
     # derivative's root for each possible set of inactive constraints.
     # Make sure the matrices are stored in row-major order as it's
     # assumed in sub-routines.
-    nonzero_elements = [0,1,2], [0,1], [0,2], [1,2], [0], [1], [2]
-    nonzero_elements = np.array([np.array(idx, dtype='intp') for idx in nonzero_elements])
-    A1 = c1 * np.dot(M.reshape((K, 1)), M.reshape((1, K)))
-    A = A1 + c2 * np.eye(K)
+    inactives = [0,1,2], [0,1], [0,2], [1,2], [0], [1], [2]
+    inactives = np.array([np.array(idx, dtype='intp') for idx in inactives])
+    A = np.dot(M.reshape((K, 1)), M.reshape((1, K))) + C
     solver = []
-    for idx in nonzero_elements:
-        e = np.zeros(K)
-        e[idx] = 1
-        Ae = A - np.dot(np.ones((K, 1)), np.dot(e.reshape((1, K)), A1)) / float(len(idx))
-        solver.append(np.asarray(np.linalg.inv(Ae[idx][:, idx]), order='C'))
+    for idx in inactives:
+        solver.append(np.asarray(np.linalg.inv(A[idx][:, idx]), order='C'))
     solver = np.array(solver)
 
     # Allocate auxiliary arrays
@@ -217,7 +246,7 @@ def simplex_fitting(Y, M, Q0, C1, C2):
     while np.PyArray_ITER_NOTDONE(itY):
         y = <double*>(np.PyArray_ITER_DATA(itY))
         q0 = <double*>(np.PyArray_ITER_DATA(itQ0))
-        simplex_fitting_(q, y[0], q0, m, c1, c2, nonzero_elements, solver, b, qe, aux)
+        simple_fitting_one_voxel(q, y[0], q0, m, c, inactives, solver, b, qe, aux)
         memcpy(<void*>q0, <void*>q, Kbytes)
         np.PyArray_ITER_NEXT(itY)
         np.PyArray_ITER_NEXT(itQ0)
