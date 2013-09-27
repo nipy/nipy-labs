@@ -74,10 +74,7 @@ def configuration(parent_package='',top_path=None):
     config.add_subpackage('bindings')
     config.add_subpackage('glm')
     config.add_subpackage('group')
-    config.add_subpackage('spatial_models')
     config.add_subpackage('utils')
-    config.add_subpackage('viz_tools')
-    config.add_subpackage('datasets')
     config.add_subpackage('tests')
 
     config.make_config_py() # installs __config__.py

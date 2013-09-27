@@ -1,31 +1,13 @@
 .. -*- rest -*-
 .. vim:syntax=rest
 
-====
-NIPY
-====
+=========
+NIPY-LABS
+=========
 
-Neuroimaging tools for Python.
+This is a subpackage of NIPY (Neuroimaging in Python) that will be
+installed under namespace nipy.labs.
 
-The aim of NIPY is to produce a platform-independent Python environment for the
-analysis of functional brain imaging data using an open development model.
-
-In NIPY we aim to:
-
-1. Provide an open source, mixed language scientific programming
-    environment suitable for rapid development.
-
-2. Create sofware components in this environment to make it easy
-    to develop tools for MRI, EEG, PET and other modalities.
-
-3. Create and maintain a wide base of developers to contribute to
-    this platform.
-
-4. To maintain and develop this framework as a single, easily
-    installable bundle.
-
-NIPY is the work of many people. We list the main authors in the file ``AUTHOR``
-in the NIPY distribution, and other contributions in ``THANKS``.
 
 Website
 =======
